@@ -12,6 +12,8 @@ const MIN_STEP := 0.07
 const RAMP_PER_COIN := 0.003
 const GLOW_DOT_COUNT := 24  # only extra-draw cost; zero extra nodes
 const AUTOPLAY_RESTART_DELAY := 2.0
+const EAT_FLASH_TIME := 0.5
+const DANGER_LOOKAHEAD := 2
 const YELL_STREAM := preload("res://assets/yell.ogg")
 const YELL_COOLDOWN := 8.0
 
@@ -30,6 +32,7 @@ var rainbow_t := 0.0
 var death_timer := 0.0
 var glow_dots: Array[Vector2] = []
 var glow_phase: Array[float] = []
+var eat_flash := 0.0
 
 var score_label: Label
 var best_label: Label
@@ -66,6 +69,7 @@ func restart_game() -> void:
 	alive = true
 	step_timer = 0.0
 	death_timer = 0.0
+	eat_flash = 0.0
 	drag_start = Vector2.INF
 	# NOTE: autoplay flag preserved; manual restarts stay manual, autoplay stays autoplay.
 	_place_coin()
@@ -106,6 +110,7 @@ func eat_coin() -> void:
 	score += 1
 	if score > best:
 		best = score
+	eat_flash = 1.0
 	_place_coin()
 	_update_hud()
 	queue_redraw()
@@ -126,37 +131,144 @@ func _physics_process(delta: float) -> void:
 
 
 func _autoplay_pick() -> Vector2i:
-	# Greedy attract AI: minimize Manhattan distance to coin among safe moves.
-	# Never reverses. Current direction wins ties (listed first).
+	# Hamilton-style survivor AI: BFS shortest path to coin (body is obstacle
+	# except the vacating tail, mirroring _step), taken only if the new tail
+	# stays reachable after the move (flood-fill guard against sealed traps).
+	# Falls back to tail-chase stalling, then any non-suicidal move.
+	if snake.is_empty():
+		return dir
+	var head: Vector2i = snake[0]
+	var blocked := _ai_blocked()
+	# 1. Shortest path to coin, guarded by tail-reachability.
+	if coin.x >= 0:
+		var first := _bfs_first(head, coin, blocked)
+		if first != Vector2i.ZERO and (first + dir != Vector2i.ZERO or snake.size() <= 1):
+			var nh := head + first
+			if not _ai_cell_hits(nh):
+				var sim: Array[Vector2i] = [nh]
+				var keep := snake.size() if nh == coin else snake.size() - 1
+				for i in keep:
+					sim.append(snake[i])
+				if _ai_tail_reachable(sim):
+					return first
+	# 2. Stall safely: chase own tail (same obstacle rules).
+	var tail: Vector2i = snake[snake.size() - 1]
+	var to_tail := _bfs_first(head, tail, blocked)
+	if to_tail != Vector2i.ZERO and (to_tail + dir != Vector2i.ZERO or snake.size() <= 1):
+		if not _ai_cell_hits(head + to_tail):
+			return to_tail
+	# 3. Any non-suicidal move, current heading first, never reverse.
 	var ordered: Array[Vector2i] = [dir]
 	for d in [Vector2i.UP, Vector2i.DOWN, Vector2i.LEFT, Vector2i.RIGHT]:
 		if d != dir and d + dir != Vector2i.ZERO:
 			ordered.append(d)
-	var target := Vector2i(coin) if coin.x >= 0 else snake[0]
-	var best_d := dir
-	var best_dist := 1 << 30
-	var found := false
 	for d in ordered:
-		var head: Vector2i = snake[0] + d
-		if head.x < 0 or head.y < 0 or head.x >= GRID_COLS or head.y >= GRID_ROWS:
+		var nh2 := head + d
+		if nh2.x < 0 or nh2.y < 0 or nh2.x >= GRID_COLS or nh2.y >= GRID_ROWS:
 			continue
-		var growing := head == coin
-		var limit := snake.size()
-		if not growing:
-			limit -= 1
-		var hits_self := false
-		for i in limit:
-			if snake[i] == head:
-				hits_self = true
-				break
-		if hits_self:
+		if _ai_cell_hits(nh2):
 			continue
-		var dist := absi(head.x - target.x) + absi(head.y - target.y)
-		if not found or dist < best_dist:
-			found = true
-			best_d = d
-			best_dist = dist
-	return best_d  # all moves lethal: keep heading, die, auto-restart
+		return d
+	return dir  # all moves lethal: keep heading, die, auto-restart
+
+
+func _ai_blocked() -> Dictionary:
+	# Snake body as obstacle, minus the tail cell that vacates this step.
+	var blocked := {}
+	for i in range(maxi(snake.size() - 1, 0)):
+		blocked[snake[i]] = true
+	return blocked
+
+
+func _ai_cell_hits(cell: Vector2i) -> bool:
+	# Mirrors _step self-kill logic: tail cell is free unless growing.
+	var growing := cell == coin
+	var limit := snake.size()
+	if not growing:
+		limit -= 1
+	for i in limit:
+		if snake[i] == cell:
+			return true
+	return false
+
+
+func _bfs_first(from: Vector2i, target: Vector2i, blocked: Dictionary) -> Vector2i:
+	# First step of the shortest path from->target, or ZERO when unreachable.
+	# Neighbor order prefers the current heading for stable, non-jittery play.
+	if from == target:
+		return Vector2i.ZERO
+	var order: Array[Vector2i] = [dir]
+	for d in [Vector2i.UP, Vector2i.DOWN, Vector2i.LEFT, Vector2i.RIGHT]:
+		if d != dir:
+			order.append(d)
+	var parent := {from: from}
+	var queue: Array[Vector2i] = [from]
+	var head_idx := 0
+	while head_idx < queue.size():
+		var cur: Vector2i = queue[head_idx]
+		head_idx += 1
+		for d in order:
+			var nxt: Vector2i = cur + d
+			if nxt.x < 0 or nxt.y < 0 or nxt.x >= GRID_COLS or nxt.y >= GRID_ROWS:
+				continue
+			if parent.has(nxt):
+				continue
+			if nxt != target and blocked.has(nxt):
+				continue
+			parent[nxt] = cur
+			if nxt == target:
+				var c := nxt
+				while parent[c] != from:
+					c = parent[c]
+				return c - from
+			queue.append(nxt)
+	return Vector2i.ZERO
+
+
+func _ai_tail_reachable(body: Array[Vector2i]) -> bool:
+	# Flood-fill from the new head: can it still reach the new tail?
+	# Free cells include the future-vacating tail (excluded from obstacles).
+	if body.is_empty():
+		return false
+	var blocked := {}
+	for i in range(body.size() - 1):
+		blocked[body[i]] = true
+	var tail: Vector2i = body[body.size() - 1]
+	var seen := {body[0]: true}
+	var queue: Array[Vector2i] = [body[0]]
+	var head_idx := 0
+	while head_idx < queue.size():
+		var cur: Vector2i = queue[head_idx]
+		head_idx += 1
+		if cur == tail:
+			return true
+		for d in [Vector2i.UP, Vector2i.DOWN, Vector2i.LEFT, Vector2i.RIGHT]:
+			var nxt: Vector2i = cur + d
+			if nxt.x < 0 or nxt.y < 0 or nxt.x >= GRID_COLS or nxt.y >= GRID_ROWS:
+				continue
+			if seen.has(nxt) or blocked.has(nxt):
+				continue
+			seen[nxt] = true
+			queue.append(nxt)
+	return seen.has(tail)
+
+
+func _danger_ahead() -> bool:
+	# True when a wall or body cell sits within DANGER_LOOKAHEAD steps ahead.
+	# Uses the same tail-vacates rule as _step (tail cell counts as free).
+	if snake.is_empty():
+		return false
+	var body := {}
+	for i in range(maxi(snake.size() - 1, 0)):
+		body[snake[i]] = true
+	var p: Vector2i = snake[0]
+	for i in DANGER_LOOKAHEAD:
+		p += dir
+		if p.x < 0 or p.y < 0 or p.x >= GRID_COLS or p.y >= GRID_ROWS:
+			return true
+		if body.has(p):
+			return true
+	return false
 
 
 func _step() -> void:
@@ -227,6 +339,8 @@ func _seed_glow_dots() -> void:
 
 func _process(delta: float) -> void:
 	rainbow_t += delta
+	if eat_flash > 0.0:
+		eat_flash = maxf(0.0, eat_flash - delta / EAT_FLASH_TIME)
 	# Cheap modulate pulse on the existing badge node (no shaders).
 	if autoplay_label != null:
 		autoplay_label.modulate = Color.from_hsv(fmod(rainbow_t * 0.12, 1.0), 0.35, 1.0) if autoplay else Color.WHITE
@@ -241,15 +355,21 @@ func _draw() -> void:
 	var field := Rect2(ORIGIN, Vector2(GRID_COLS * CELL, GRID_ROWS * CELL))
 	var hue := fmod(rainbow_t * 0.06, 1.0)
 	draw_rect(Rect2(Vector2.ZERO, Vector2(1152, 648)), Color(0.04, 0.08, 0.05))
-	# Background glow dots: slow hue-cycling, low alpha, zero extra nodes.
+	# Background glow dots: hue-cycling, alpha shimmers with step rate.
+	var speed_t := 0.0
+	if BASE_STEP > MIN_STEP:
+		speed_t = clampf((BASE_STEP - current_step()) / (BASE_STEP - MIN_STEP), 0.0, 1.0)
 	for i in GLOW_DOT_COUNT:
 		var pulse := 0.5 + 0.5 * sin(rainbow_t * 0.8 + glow_phase[i])
 		var dot_hue := fmod(hue + float(i) / float(GLOW_DOT_COUNT), 1.0)
 		var radius := 26.0 + 14.0 * (float(i % 5) / 4.0)
-		draw_circle(glow_dots[i], radius, Color(Color.from_hsv(dot_hue, 0.6, 0.9), 0.05 + 0.04 * pulse))
+		draw_circle(glow_dots[i], radius, Color(Color.from_hsv(dot_hue, 0.6, 0.9), (0.05 + 0.04 * pulse) * (1.0 + speed_t)))
 	# Arena frame cycles rainbow hues over time.
 	draw_rect(field.grow(10.0), Color(Color.from_hsv(hue, 0.8, 0.55), 0.35))
 	draw_rect(field.grow(6.0), Color.from_hsv(hue, 0.7, 0.85))
+	if _danger_ahead() and alive:
+		var dpulse := 0.5 + 0.5 * sin(rainbow_t * 10.0)
+		draw_rect(field.grow(6.0), Color(1.0, 0.15, 0.15, 0.35 + 0.4 * dpulse), false, 4.0)
 	draw_rect(field, Color(0.06, 0.14, 0.08))
 	# Faint checkerboard for readability.
 	for y in GRID_ROWS:
@@ -297,6 +417,9 @@ func _draw() -> void:
 			var base := Color(0.62, 0.93, 0.79) if i % 2 == 0 else Color(0.79, 0.79, 0.98)
 			var col := base.lerp(base.darkened(0.18), t)
 			draw_rect(cell_rect, col, true)
+	# Eat flash: fullscreen white overlay decaying over EAT_FLASH_TIME.
+	if eat_flash > 0.0:
+		draw_rect(Rect2(Vector2.ZERO, Vector2(1152, 648)), Color(1.0, 1.0, 1.0, 0.35 * eat_flash))
 
 
 func _octagon_points(center: Vector2, radius: float) -> PackedVector2Array:
