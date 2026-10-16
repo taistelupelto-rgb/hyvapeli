@@ -15,7 +15,11 @@ const AUTOPLAY_RESTART_DELAY := 2.0
 const EAT_FLASH_TIME := 0.5
 const DANGER_LOOKAHEAD := 2
 const YELL_STREAM := preload("res://assets/yell.ogg")
-const YELL_COOLDOWN := 8.0
+const YELL_COOLDOWN := 1.0
+const MAX_HEARTS := 3
+const MERCY_TIME := 2.0
+const COINS_PER_HEART := 8
+const HURT_FLASH_TIME := 0.6
 
 var snake: Array[Vector2i] = []
 var dir := Vector2i.RIGHT
@@ -44,6 +48,11 @@ var overlay_sub: Label
 var yell_player: AudioStreamPlayer
 var yell_muted := false
 var last_yell_msec := -100000
+var hearts := 3
+var mercy_timer := 0.0
+var hurt_flash := 0.0
+var coins_since_heal := 0
+var hp_label: Label
 
 
 func _ready() -> void:
@@ -61,6 +70,10 @@ func start_game() -> void:
 
 func restart_game() -> void:
 	score = 0
+	hearts = MAX_HEARTS
+	mercy_timer = 0.0
+	hurt_flash = 0.0
+	coins_since_heal = 0
 	var cx := GRID_COLS / 2
 	var cy := GRID_ROWS / 2
 	snake = [Vector2i(cx, cy), Vector2i(cx - 1, cy), Vector2i(cx - 2, cy), Vector2i(cx - 3, cy)]
@@ -110,6 +123,11 @@ func eat_coin() -> void:
 	score += 1
 	if score > best:
 		best = score
+	coins_since_heal += 1
+	if coins_since_heal >= COINS_PER_HEART:
+		coins_since_heal = 0
+		if hearts < MAX_HEARTS:
+			hearts += 1
 	eat_flash = 1.0
 	_place_coin()
 	_update_hud()
@@ -277,17 +295,21 @@ func _step() -> void:
 	if queued_dir + dir != Vector2i.ZERO or snake.size() <= 1:
 		dir = queued_dir
 	var head: Vector2i = snake[0] + dir
-	# Walls kill.
+	# Walls kill (mercy invincibility: hold position, no death).
 	if head.x < 0 or head.y < 0 or head.x >= GRID_COLS or head.y >= GRID_ROWS:
+		if mercy_timer > 0.0:
+			return
 		_die()
 		return
 	var growing := head == coin
-	# Self kill (tail cell is free unless growing).
+	# Self kill (tail cell is free unless growing; mercy: hold position).
 	var limit := snake.size()
 	if not growing:
 		limit -= 1
 	for i in limit:
 		if snake[i] == head:
+			if mercy_timer > 0.0:
+				return
 			_die()
 			return
 	snake.push_front(head)
@@ -299,8 +321,32 @@ func _step() -> void:
 
 
 func _die() -> void:
+	if mercy_timer > 0.0:
+		return
+	# Damage system: hearts absorb lethal hits, yell EVERY time.
+	if hearts > 1:
+		hearts -= 1
+		last_yell_msec = -100000  # force yell: every damage yells
+		_play_yell()
+		hurt_flash = 1.0
+		mercy_timer = MERCY_TIME
+		var cx := GRID_COLS / 2
+		var cy := GRID_ROWS / 2
+		snake = [Vector2i(cx, cy), Vector2i(cx - 1, cy), Vector2i(cx - 2, cy), Vector2i(cx - 3, cy)]
+		dir = Vector2i.RIGHT
+		queued_dir = Vector2i.RIGHT
+		step_timer = 0.0
+		if coin in snake:
+			_place_coin()
+		_update_hud()
+		queue_redraw()
+		if DisplayServer.get_name() == "headless":
+			print("[damage] hit hearts=%d mercy=%.1f score=%d" % [hearts, mercy_timer, score])
+		return
+	hearts = 0
 	alive = false
 	death_timer = 0.0
+	last_yell_msec = -100000  # force yell: death always yells
 	_play_yell()
 	if score > best:
 		best = score
@@ -341,6 +387,10 @@ func _process(delta: float) -> void:
 	rainbow_t += delta
 	if eat_flash > 0.0:
 		eat_flash = maxf(0.0, eat_flash - delta / EAT_FLASH_TIME)
+	if hurt_flash > 0.0:
+		hurt_flash = maxf(0.0, hurt_flash - delta / HURT_FLASH_TIME)
+	if mercy_timer > 0.0:
+		mercy_timer = maxf(0.0, mercy_timer - delta)
 	# Cheap modulate pulse on the existing badge node (no shaders).
 	if autoplay_label != null:
 		autoplay_label.modulate = Color.from_hsv(fmod(rainbow_t * 0.12, 1.0), 0.35, 1.0) if autoplay else Color.WHITE
@@ -390,6 +440,9 @@ func _draw() -> void:
 	for i in range(snake.size() - 1, -1, -1):
 		var cell_rect := Rect2(ORIGIN + Vector2(snake[i]) * CELL + Vector2(2, 2), Vector2(CELL - 4, CELL - 4))
 		if i == 0:
+			# Mercy invincibility blink: skip head every other beat.
+			if mercy_timer > 0.0 and fmod(rainbow_t * 12.0, 2.0) < 1.0:
+				continue
 			var hc := cell_rect.get_center()
 			# White glow pulse behind the head.
 			var hpulse := 0.5 + 0.5 * sin(rainbow_t * 4.0)
@@ -420,6 +473,9 @@ func _draw() -> void:
 	# Eat flash: fullscreen white overlay decaying over EAT_FLASH_TIME.
 	if eat_flash > 0.0:
 		draw_rect(Rect2(Vector2.ZERO, Vector2(1152, 648)), Color(1.0, 1.0, 1.0, 0.35 * eat_flash))
+	# Hurt flash: fullscreen red overlay decaying over HURT_FLASH_TIME.
+	if hurt_flash > 0.0:
+		draw_rect(Rect2(Vector2.ZERO, Vector2(1152, 648)), Color(1.0, 0.1, 0.1, 0.45 * hurt_flash))
 
 
 func _octagon_points(center: Vector2, radius: float) -> PackedVector2Array:
@@ -559,6 +615,12 @@ func _build_hud() -> void:
 	hud.add_child(score_label)
 	score_label.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	score_label.position = Vector2(48, 16)
+	hp_label = Label.new()
+	hp_label.add_theme_font_size_override("font_size", 36)
+	hp_label.add_theme_color_override("font_color", Color(1.0, 0.2, 0.25))
+	hud.add_child(hp_label)
+	hp_label.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	hp_label.position = Vector2(260, 16)
 	best_label = Label.new()
 	best_label.add_theme_font_size_override("font_size", 36)
 	best_label.add_theme_color_override("font_color", Color.WHITE)
@@ -616,6 +678,8 @@ func _build_overlay() -> void:
 
 func _update_hud() -> void:
 	score_label.text = "Coins: %d" % score
+	if hp_label != null:
+		hp_label.text = "HP: %d" % hearts
 	best_label.text = "Best: %d" % best
 	if hint_label != null:
 		hint_label.text = "Nekomimi Snake - Mmmmm coins  |  WASD / arrows / swipe  |  R to restart  |  T autoplay  |  M mute" + ("  [MUTED]" if yell_muted else "")
