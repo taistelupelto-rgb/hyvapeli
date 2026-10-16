@@ -68,26 +68,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Diagnose export setup
-        run: |
-          set -e
-          ls "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable/" | head -n 30
-          echo "--- presets ---"
-          cat export_presets.cfg
-          echo "--- project ---"
-          cat project.godot
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Import + export web
         run: |
           set -e
-          set -o pipefail
           BIN="$HOME/godot/Godot_v${GODOT_VERSION}-stable_linux.x86_64"
           chmod +x "$BIN"
           "$BIN" --headless --path . --import
           mkdir -p build/web
-          "$BIN" --headless --verbose --path . --export-release Web build/web/index.html 2>&1 | tail -n 120
+          "$BIN" --headless --path . --export-release Web build/web/index.html
           ls -la build/web
 
       - name: Zip + attach to release (tags only)
