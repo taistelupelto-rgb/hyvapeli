@@ -1,313 +1,270 @@
 extends Node2D
-## Hyvapeli: Mmmmm coins. Grab GOAL coins before the timer runs out.
-## Controls: WASD / arrows, or mouse / touch drag. R / Enter / tap restarts.
+## Hyvapeli: Snake with coins. Eat golden coins to grow and score.
+## Controls: WASD / arrows, swipe or drag to steer. R / Enter / Space / click / tap restarts.
 
-const ARENA := Rect2(40, 90, 1072, 500)
-const PLAYER_SPEED := 420.0
-const PLAYER_RADIUS := 24.0
-const COIN_RADIUS := 18.0
-const PICKUP_DIST := 44.0
-const COINS_ON_FIELD := 6
-const GOAL := 12
-const TIME_LIMIT := 60.0
+const GRID_COLS := 24
+const GRID_ROWS := 16
+const CELL := 32.0
+const ORIGIN := Vector2(192.0, 88.0)  # centers 768x512 field in 1152x648
+const BASE_STEP := 0.14
+const MIN_STEP := 0.07
+const RAMP_PER_COIN := 0.003
 
+var snake: Array[Vector2i] = []
+var dir := Vector2i.RIGHT
+var queued_dir := Vector2i.RIGHT
+var coin := Vector2i(-1, -1)
 var score := 0
-var time_left := TIME_LIMIT
-var playing := false
-var won := false
-var elapsed := 0.0
+var best := 0
+var alive := true
+var step_timer := 0.0
 var rng := RandomNumberGenerator.new()
-
-var player: CharacterBody2D
-var player_body: Polygon2D
-var player_pop := 0.0
-var drag_target := Vector2.INF  # active pointer destination, INF = none
-var coins: Array[Node2D] = []
+var drag_start := Vector2.INF  # pointer swipe anchor, INF = none
 
 var score_label: Label
-var timer_label: Label
+var best_label: Label
 var hint_label: Label
 var overlay: CanvasLayer
 var overlay_title: Label
 var overlay_sub: Label
 
-var sfx_pickup: AudioStreamPlayer
-var sfx_win: AudioStreamPlayer
-var sfx_lose: AudioStreamPlayer
-var pickup_pitch := 1.0
-
 
 func _ready() -> void:
-	rng.seed = 1234567
-	_build_background()
-	_build_player()
+	rng.randomize()
 	_build_hud()
 	_build_overlay()
-	_build_audio()
 	start_game()
 
 
 func start_game() -> void:
+	restart_game()
+
+
+func restart_game() -> void:
 	score = 0
-	time_left = TIME_LIMIT
-	playing = true
-	won = false
-	elapsed = 0.0
-	pickup_pitch = 1.0
-	player.position = ARENA.get_center()
-	player.velocity = Vector2.ZERO
-	drag_target = Vector2.INF
-	for c in coins:
-		c.queue_free()
-	coins.clear()
-	for i in COINS_ON_FIELD:
-		spawn_coin()
+	var cx := GRID_COLS / 2
+	var cy := GRID_ROWS / 2
+	snake = [Vector2i(cx, cy), Vector2i(cx - 1, cy), Vector2i(cx - 2, cy), Vector2i(cx - 3, cy)]
+	dir = Vector2i.RIGHT
+	queued_dir = Vector2i.RIGHT
+	alive = true
+	step_timer = 0.0
+	drag_start = Vector2.INF
+	_place_coin()
 	overlay.visible = false
 	_update_hud()
+	queue_redraw()
+
+
+func current_step() -> float:
+	return maxf(MIN_STEP, BASE_STEP - float(score) * RAMP_PER_COIN)
+
+
+func set_direction(d: Vector2i) -> void:
+	# Reject zero and direct reversal of the committed direction.
+	if d == Vector2i.ZERO:
+		return
+	if d + dir == Vector2i.ZERO and snake.size() > 1:
+		return
+	queued_dir = d
+
+
+func eat_coin() -> void:
+	# Test/debug hook: force the eat path as if the head reached the coin.
+	if not alive:
+		return
+	score += 1
+	if score > best:
+		best = score
+	_place_coin()
+	_update_hud()
+	queue_redraw()
 
 
 func _physics_process(delta: float) -> void:
-	if not playing:
+	_poll_keys()
+	if not alive:
 		return
-	elapsed += delta
-	time_left -= delta
-	if time_left <= 0.0:
-		time_left = 0.0
-		end_game(false)
+	step_timer += delta
+	var interval := current_step()
+	while step_timer >= interval and alive:
+		step_timer -= interval
+		_step()
+		interval = current_step()
+
+
+func _step() -> void:
+	if queued_dir + dir != Vector2i.ZERO or snake.size() <= 1:
+		dir = queued_dir
+	var head: Vector2i = snake[0] + dir
+	# Walls kill.
+	if head.x < 0 or head.y < 0 or head.x >= GRID_COLS or head.y >= GRID_ROWS:
+		_die()
 		return
-
-	var dir := Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
-	dir += _wasd_vector()
-	if dir.length() > 1.0:
-		dir = dir.normalized()
-	if dir != Vector2.ZERO:
-		drag_target = Vector2.INF  # keys win over pointer
-		player.velocity = dir * PLAYER_SPEED
-	elif drag_target != Vector2.INF:
-		var to := drag_target - player.position
-		if to.length() < 8.0:
-			player.velocity = Vector2.ZERO
-			drag_target = Vector2.INF
-		else:
-			player.velocity = to.normalized() * PLAYER_SPEED
+	var growing := head == coin
+	# Self kill (tail cell is free unless growing).
+	var limit := snake.size()
+	if not growing:
+		limit -= 1
+	for i in limit:
+		if snake[i] == head:
+			_die()
+			return
+	snake.push_front(head)
+	if growing:
+		eat_coin()
 	else:
-		player.velocity = Vector2.ZERO
-	player.move_and_slide()
-	player.position.x = clampf(player.position.x, ARENA.position.x, ARENA.position.x + ARENA.size.x)
-	player.position.y = clampf(player.position.y, ARENA.position.y, ARENA.position.y + ARENA.size.y)
-
-	# Juicy wobble.
-	if player_pop > 0.0:
-		player_pop = maxf(0.0, player_pop - delta * 6.0)
-	var s := 1.0 + 0.25 * player_pop
-	player_body.scale = Vector2(s, s)
-	player_body.rotation += delta * (2.0 + player.velocity.length() / 150.0)
-
-	# Coin pickup by distance (no signals, no misses).
-	for i in range(coins.size() - 1, -1, -1):
-		var c := coins[i]
-		if not is_instance_valid(c):
-			coins.remove_at(i)
-			continue
-		if player.position.distance_to(c.position) <= PICKUP_DIST:
-			coins.remove_at(i)
-			c.queue_free()
-			_collect_coin()
-
-	# Coin bob and spin.
-	for c in coins:
-		if is_instance_valid(c):
-			c.scale = Vector2.ONE * (1.0 + 0.08 * sin(elapsed * 5.0 + c.position.x * 0.05))
-			c.rotation += delta * 1.5
-
-	_update_hud()
+		snake.pop_back()
+	queue_redraw()
 
 
-func _collect_coin() -> void:
-	score += 1
-	player_pop = 1.0
-	pickup_pitch = minf(pickup_pitch + 0.06, 1.6)  # rising pitch = more fun
-	sfx_pickup.pitch_scale = pickup_pitch
-	sfx_pickup.play()
-	if score >= GOAL:
-		end_game(true)
-	else:
-		spawn_coin()
-		_update_hud()
-
-
-func end_game(victory: bool) -> void:
-	playing = false
-	won = victory
-	if victory:
-		sfx_win.play()
-		overlay_title.text = "MMMMM COINS! YOU WIN!"
-		overlay_sub.text = "You grabbed %d coins with %.1fs left.\nMmmmm. Tasty.\n\nPress R / Enter or tap to play again" % [score, time_left]
-	else:
-		sfx_lose.play()
-		overlay_title.text = "TIME UP! SO HUNGRY!"
-		overlay_sub.text = "You grabbed %d / %d coins.\nMmmmm... almost.\n\nPress R / Enter or tap to try again" % [score, GOAL]
+func _die() -> void:
+	alive = false
+	if score > best:
+		best = score
+	overlay_title.text = "GAME OVER"
+	overlay_sub.text = "Score: %d   Best: %d\nEat coins, dodge walls and tail.\nPress R / Enter / Space or click / tap" % [score, best]
 	overlay.visible = true
 	_update_hud()
+	queue_redraw()
 
 
-func _input(event: InputEvent) -> void:
-	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-		if not playing:
-			start_game()
+func _place_coin() -> void:
+	var free: Array[Vector2i] = []
+	for y in GRID_ROWS:
+		for x in GRID_COLS:
+			var c := Vector2i(x, y)
+			if not c in snake:
+				free.append(c)
+	if free.is_empty():
+		coin = Vector2i(-1, -1)
+		return
+	coin = free[rng.randi_range(0, free.size() - 1)]
+
+
+func _process(_delta: float) -> void:
+	queue_redraw()
+
+
+func _draw() -> void:
+	var field := Rect2(ORIGIN, Vector2(GRID_COLS * CELL, GRID_ROWS * CELL))
+	draw_rect(Rect2(Vector2.ZERO, Vector2(1152, 648)), Color(0.04, 0.08, 0.05))
+	draw_rect(field.grow(6.0), Color(0.12, 0.32, 0.18))
+	draw_rect(field, Color(0.06, 0.14, 0.08))
+	# Faint checkerboard for readability.
+	for y in GRID_ROWS:
+		for x in GRID_COLS:
+			if (x + y) % 2 == 0:
+				draw_rect(Rect2(ORIGIN + Vector2(x, y) * CELL, Vector2(CELL, CELL)), Color(1, 1, 1, 0.03))
+	# Coin: golden octagon with shine.
+	if coin.x >= 0:
+		var cc := ORIGIN + (Vector2(coin) + Vector2(0.5, 0.5)) * CELL
+		var r := CELL * 0.36
+		draw_colored_polygon(_octagon_points(cc, r), Color(0.78, 0.55, 0.05))
+		draw_colored_polygon(_octagon_points(cc, r * 0.7), Color(1.0, 0.85, 0.3))
+		draw_circle(cc + Vector2(-r * 0.22, -r * 0.28), r * 0.18, Color(1.0, 0.96, 0.7))
+	# Snake: green rounded body, lighter head, white eyes.
+	for i in range(snake.size() - 1, -1, -1):
+		var cell_rect := Rect2(ORIGIN + Vector2(snake[i]) * CELL + Vector2(2, 2), Vector2(CELL - 4, CELL - 4))
+		if i == 0:
+			draw_rect(cell_rect, Color(0.35, 0.85, 0.42), true)
+			var hc := cell_rect.get_center()
+			var eye_off := Vector2(dir) * 6.0
+			var perp := Vector2(-dir.y, dir.x) * 7.0
+			draw_circle(hc + eye_off + perp, 4.0, Color.WHITE)
+			draw_circle(hc + eye_off - perp, 4.0, Color.WHITE)
+			draw_circle(hc + eye_off + perp, 2.0, Color(0.02, 0.05, 0.03))
+			draw_circle(hc + eye_off - perp, 2.0, Color(0.02, 0.05, 0.03))
 		else:
-			drag_target = get_global_mouse_position()
-	elif event is InputEventMouseMotion and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
-		if playing:
-			drag_target = get_global_mouse_position()
-	elif event is InputEventScreenTouch:
-		if not playing:
-			if event.pressed:
-				start_game()
-		elif event.pressed:
-			drag_target = event.position
-		else:
-			drag_target = Vector2.INF
-	elif event is InputEventScreenDrag:
-		if playing:
-			drag_target = event.position
-	elif event is InputEventKey and event.pressed and not event.echo:
-		var k := event as InputEventKey
-		if k.physical_keycode == KEY_R or k.physical_keycode == KEY_ENTER or k.physical_keycode == KEY_KP_ENTER:
-			start_game()
-		elif not playing and k.physical_keycode == KEY_SPACE:
-			start_game()
+			var t := float(i) / float(maxi(snake.size() - 1, 1))
+			var col := Color(0.18, 0.75, 0.35).lerp(Color(0.10, 0.45, 0.20), t)
+			draw_rect(cell_rect, col, true)
 
 
-func _wasd_vector() -> Vector2:
-	var v := Vector2.ZERO
-	if Input.is_physical_key_pressed(KEY_A):
-		v.x -= 1.0
-	if Input.is_physical_key_pressed(KEY_D):
-		v.x += 1.0
-	if Input.is_physical_key_pressed(KEY_W):
-		v.y -= 1.0
-	if Input.is_physical_key_pressed(KEY_S):
-		v.y += 1.0
-	return v
-
-
-func spawn_coin() -> void:
-	var pos := _random_arena_point()
-	# Keep some distance from the player so it never spawns on top.
-	for attempt in 12:
-		if pos.distance_to(player.position) >= 140.0:
-			break
-		pos = _random_arena_point()
-	var coin := Node2D.new()
-	coin.position = pos
-	var rim := Polygon2D.new()
-	rim.polygon = _octagon(COIN_RADIUS)
-	rim.color = Color(0.78, 0.55, 0.05)
-	var face := Polygon2D.new()
-	face.polygon = _octagon(COIN_RADIUS * 0.72)
-	face.color = Color(1.0, 0.85, 0.3)
-	var shine := Polygon2D.new()
-	shine.polygon = _octagon(COIN_RADIUS * 0.34)
-	shine.position = Vector2(-4, -5)
-	shine.color = Color(1.0, 0.96, 0.7)
-	coin.add_child(rim)
-	coin.add_child(face)
-	coin.add_child(shine)
-	add_child(coin)
-	coins.append(coin)
-
-
-func _random_arena_point() -> Vector2:
-	return Vector2(
-		rng.randf_range(ARENA.position.x + 30.0, ARENA.position.x + ARENA.size.x - 30.0),
-		rng.randf_range(ARENA.position.y + 30.0, ARENA.position.y + ARENA.size.y - 30.0)
-	)
-
-
-func _octagon(r: float) -> PackedVector2Array:
+func _octagon_points(center: Vector2, radius: float) -> PackedVector2Array:
 	var pts := PackedVector2Array()
 	for i in 8:
 		var a := TAU * float(i) / 8.0 + PI / 8.0
-		pts.append(Vector2(cos(a), sin(a)) * r)
+		pts.append(center + Vector2(cos(a), sin(a)) * radius)
 	return pts
 
 
-func _circle_poly(r: float, n := 24) -> PackedVector2Array:
-	var pts := PackedVector2Array()
-	for i in n:
-		var a := TAU * float(i) / float(n)
-		pts.append(Vector2(cos(a), sin(a)) * r)
-	return pts
+func _poll_keys() -> void:
+	var d := Vector2i.ZERO
+	if Input.is_physical_key_pressed(KEY_A) or Input.is_key_pressed(KEY_LEFT):
+		d = Vector2i.LEFT
+	elif Input.is_physical_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT):
+		d = Vector2i.RIGHT
+	elif Input.is_physical_key_pressed(KEY_W) or Input.is_key_pressed(KEY_UP):
+		d = Vector2i.UP
+	elif Input.is_physical_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN):
+		d = Vector2i.DOWN
+	if d != Vector2i.ZERO:
+		set_direction(d)
 
 
-func _build_background() -> void:
-	var layer := CanvasLayer.new()
-	layer.layer = -10
-	add_child(layer)
-	var bg := ColorRect.new()
-	bg.color = Color(0.05, 0.07, 0.14)
-	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
-	layer.add_child(bg)
-	# Arena frame drawn in world space.
-	var frame := Line2D.new()
-	frame.width = 4.0
-	frame.default_color = Color(0.3, 0.5, 0.9, 0.8)
-	frame.points = PackedVector2Array([
-		ARENA.position,
-		ARENA.position + Vector2(ARENA.size.x, 0),
-		ARENA.position + ARENA.size,
-		ARENA.position + Vector2(0, ARENA.size.y),
-		ARENA.position,
-	])
-	add_child(frame)
-	# Decorative floor dots.
-	for i in 40:
-		var dot := Polygon2D.new()
-		dot.polygon = _octagon(rng.randf_range(2.0, 5.0))
-		dot.color = Color(0.16, 0.2, 0.34, 0.9)
-		dot.position = _random_arena_point()
-		add_child(dot)
+func _input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo:
+		var k := event as InputEventKey
+		match k.physical_keycode:
+			KEY_W, KEY_UP:
+				set_direction(Vector2i.UP)
+			KEY_S, KEY_DOWN:
+				set_direction(Vector2i.DOWN)
+			KEY_A, KEY_LEFT:
+				set_direction(Vector2i.LEFT)
+			KEY_D, KEY_RIGHT:
+				set_direction(Vector2i.RIGHT)
+			KEY_R, KEY_ENTER, KEY_KP_ENTER, KEY_SPACE:
+				restart_game()
+		# Fallback for layouts where physical keycode is unset (web quirk).
+		if k.keycode != KEY_NONE:
+			match k.keycode:
+				KEY_W, KEY_UP:
+					set_direction(Vector2i.UP)
+				KEY_S, KEY_DOWN:
+					set_direction(Vector2i.DOWN)
+				KEY_A, KEY_LEFT:
+					set_direction(Vector2i.LEFT)
+				KEY_D, KEY_RIGHT:
+					set_direction(Vector2i.RIGHT)
+		return
+	if event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		if mb.button_index == MOUSE_BUTTON_LEFT:
+			if mb.pressed:
+				if not alive:
+					restart_game()
+				else:
+					drag_start = mb.position
+			else:
+				drag_start = Vector2.INF
+	elif event is InputEventMouseMotion:
+		if alive and drag_start != Vector2.INF:
+			_apply_swipe((event as InputEventMouseMotion).position)
+	elif event is InputEventScreenTouch:
+		var st := event as InputEventScreenTouch
+		if st.pressed:
+			if not alive:
+				restart_game()
+			else:
+				drag_start = st.position
+		else:
+			drag_start = Vector2.INF
+	elif event is InputEventScreenDrag:
+		if alive and drag_start != Vector2.INF:
+			_apply_swipe((event as InputEventScreenDrag).position)
 
 
-func _build_player() -> void:
-	player = CharacterBody2D.new()
-	player.position = ARENA.get_center()
-	var shape := CollisionShape2D.new()
-	var circle := CircleShape2D.new()
-	circle.radius = PLAYER_RADIUS
-	shape.shape = circle
-	player.add_child(shape)
-	player_body = Polygon2D.new()
-	player_body.polygon = _circle_poly(PLAYER_RADIUS)
-	player_body.color = Color(0.25, 0.6, 1.0)
-	player.add_child(player_body)
-	var belly := Polygon2D.new()
-	belly.polygon = _circle_poly(PLAYER_RADIUS * 0.55)
-	belly.position = Vector2(0, 4)
-	belly.color = Color(0.7, 0.88, 1.0)
-	player.add_child(belly)
-	var eye_l := Polygon2D.new()
-	eye_l.polygon = _circle_poly(5.0, 10)
-	eye_l.position = Vector2(-8, -6)
-	eye_l.color = Color.WHITE
-	player.add_child(eye_l)
-	var eye_r := Polygon2D.new()
-	eye_r.polygon = _circle_poly(5.0, 10)
-	eye_r.position = Vector2(8, -6)
-	eye_r.color = Color.WHITE
-	player.add_child(eye_r)
-	var pup_l := Polygon2D.new()
-	pup_l.polygon = _circle_poly(2.4, 8)
-	pup_l.position = Vector2(-8, -6)
-	pup_l.color = Color(0.02, 0.03, 0.08)
-	player.add_child(pup_l)
-	var pup_r := Polygon2D.new()
-	pup_r.polygon = _circle_poly(2.4, 8)
-	pup_r.position = Vector2(8, -6)
-	pup_r.color = Color(0.02, 0.03, 0.08)
-	player.add_child(pup_r)
-	add_child(player)
+func _apply_swipe(pos: Vector2) -> void:
+	var delta := pos - drag_start
+	if delta.length() < 24.0:
+		return
+	if absf(delta.x) >= absf(delta.y):
+		set_direction(Vector2i.RIGHT if delta.x > 0.0 else Vector2i.LEFT)
+	else:
+		set_direction(Vector2i.DOWN if delta.y > 0.0 else Vector2i.UP)
+	drag_start = pos  # re-anchor so one swipe can chain turns
 
 
 func _build_hud() -> void:
@@ -315,27 +272,28 @@ func _build_hud() -> void:
 	hud.name = "HUD"
 	add_child(hud)
 	score_label = Label.new()
-	score_label.position = Vector2(48, 16)
 	score_label.add_theme_font_size_override("font_size", 36)
 	score_label.add_theme_color_override("font_color", Color(1.0, 0.85, 0.3))
-	add_child(score_label)
-	score_label.set_anchors_preset(Control.PRESET_TOP_LEFT)
-	# Labels need the CanvasLayer as parent to draw in screen space.
-	remove_child(score_label)
 	hud.add_child(score_label)
-	timer_label = Label.new()
-	timer_label.add_theme_font_size_override("font_size", 36)
-	timer_label.add_theme_color_override("font_color", Color.WHITE)
-	hud.add_child(timer_label)
-	timer_label.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	timer_label.position = Vector2(-60, 16)
+	score_label.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	score_label.position = Vector2(48, 16)
+	best_label = Label.new()
+	best_label.add_theme_font_size_override("font_size", 36)
+	best_label.add_theme_color_override("font_color", Color.WHITE)
+	hud.add_child(best_label)
+	best_label.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	best_label.position = Vector2(-248, 16)
+	best_label.size = Vector2(200, 48)
+	best_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	hint_label = Label.new()
-	hint_label.text = "WASD / arrows / drag to move  |  R to restart"
+	hint_label.text = "WASD / arrows / swipe to steer  |  R to restart"
 	hint_label.add_theme_font_size_override("font_size", 18)
-	hint_label.add_theme_color_override("font_color", Color(0.7, 0.75, 0.9))
+	hint_label.add_theme_color_override("font_color", Color(0.7, 0.8, 0.72))
 	hud.add_child(hint_label)
 	hint_label.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
-	hint_label.position = Vector2(-230, -40)
+	hint_label.position = Vector2(-250, -36)
+	hint_label.size = Vector2(500, 28)
+	hint_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 
 
 func _build_overlay() -> void:
@@ -359,7 +317,6 @@ func _build_overlay() -> void:
 	overlay_sub.add_theme_color_override("font_color", Color.WHITE)
 	overlay_sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	overlay_sub.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	overlay_sub.autowrap_mode = TextServer.AUTOWRAP_OFF
 	overlay_sub.set_anchors_preset(Control.PRESET_CENTER)
 	overlay_sub.position = Vector2(-500, -30)
 	overlay_sub.size = Vector2(1000, 200)
@@ -367,60 +324,6 @@ func _build_overlay() -> void:
 	overlay.visible = false
 
 
-func _build_audio() -> void:
-	sfx_pickup = AudioStreamPlayer.new()
-	sfx_pickup.stream = _make_tone(880.0, 0.12, 0.25)
-	add_child(sfx_pickup)
-	sfx_win = AudioStreamPlayer.new()
-	sfx_win.stream = _make_arpeggio([523.25, 659.25, 783.99, 1046.5], 0.14)
-	add_child(sfx_win)
-	sfx_lose = AudioStreamPlayer.new()
-	sfx_lose.stream = _make_tone(160.0, 0.5, 0.3)
-	add_child(sfx_lose)
-
-
-func _make_tone(freq: float, duration: float, volume: float) -> AudioStreamWAV:
-	var rate := 22050
-	var n := int(duration * float(rate))
-	var data := PackedByteArray()
-	data.resize(n)
-	for i in n:
-		var t := float(i) / float(rate)
-		var env := 1.0 - float(i) / float(n)  # linear decay, no clicks
-		var v := sin(TAU * freq * t) * env * volume
-		data[i] = int(clampf(v * 127.0 + 128.0, 0.0, 255.0))
-	var wav := AudioStreamWAV.new()
-	wav.format = AudioStreamWAV.FORMAT_8_BITS
-	wav.mix_rate = rate
-	wav.stereo = false
-	wav.data = data
-	return wav
-
-
-func _make_arpeggio(freqs: Array, note_len: float) -> AudioStreamWAV:
-	var rate := 22050
-	var per := int(note_len * float(rate))
-	var data := PackedByteArray()
-	data.resize(per * freqs.size())
-	for j in freqs.size():
-		var freq := float(freqs[j])
-		for i in per:
-			var t := float(i) / float(rate)
-			var env := 1.0 - float(i) / float(per)
-			var v := sin(TAU * freq * t) * env * 0.3
-			data[j * per + i] = int(clampf(v * 127.0 + 128.0, 0.0, 255.0))
-	var wav := AudioStreamWAV.new()
-	wav.format = AudioStreamWAV.FORMAT_8_BITS
-	wav.mix_rate = rate
-	wav.stereo = false
-	wav.data = data
-	return wav
-
-
 func _update_hud() -> void:
-	score_label.text = "Coins: %d / %d  Mmmmm!" % [score, GOAL]
-	timer_label.text = "%.1fs" % time_left
-	if time_left < 10.0 and playing:
-		timer_label.add_theme_color_override("font_color", Color(1.0, 0.35, 0.35))
-	else:
-		timer_label.add_theme_color_override("font_color", Color.WHITE)
+	score_label.text = "Coins: %d" % score
+	best_label.text = "Best: %d" % best
