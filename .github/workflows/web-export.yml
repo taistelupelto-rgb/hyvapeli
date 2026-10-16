@@ -1,0 +1,130 @@
+name: web-export
+
+# Hyvapeli pipeline: every push to main AND every version tag exports the
+# Godot web build and deploys it straight to https://uuh.uusbitch.party.
+# Newest version is always live. Tags additionally attach the playable
+# zip to the GitHub release.
+# Manual: workflow_dispatch rebuilds and redeploys the latest main.
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Serialize production deploys so concurrent runs land in order,
+# newest last. No polling timer: every run deploys itself.
+concurrency:
+  group: uuh-prod-deploy
+  cancel-in-progress: false
+
+env:
+  GODOT_VERSION: 4.7.2
+  WEBROOT: /var/www/uuh.uusbitch.party
+
+jobs:
+  export-web:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      zip: ${{ steps.meta.outputs.zip }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: meta
+        run: |
+          set -e
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG="main-${GITHUB_SHA::7}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "zip=hyvapeli-godot-web-${TAG}.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Install Godot editor + export templates
+        run: |
+          set -e
+          mkdir -p "$HOME/godot" "$HOME/.local/share/godot/export_templates"
+          cd "$HOME/godot"
+          gh release download "${GODOT_VERSION}-stable" \
+            --repo godotengine/godot \
+            --pattern "Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          gh release download "${GODOT_VERSION}-stable" \
+            --repo godotengine/godot \
+            --pattern "Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+          unzip -q -o "Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          unzip -q -o "Godot_v${GODOT_VERSION}-stable_export_templates.tpz" \
+            -d "$HOME/.local/share/godot/export_templates/"
+          mv "$HOME/.local/share/godot/export_templates/templates" \
+             "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+          ls "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable/" | grep -i web
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Import + export web
+        run: |
+          set -e
+          BIN="$HOME/godot/Godot_v${GODOT_VERSION}-stable_linux.x86_64"
+          chmod +x "$BIN"
+          "$BIN" --headless --path . --import
+          mkdir -p build/web
+          "$BIN" --headless --path . --export-release Web build/web/index.html
+          ls -la build/web
+
+      - name: Zip + attach to release (tags only)
+        run: |
+          set -e
+          TAG="${{ steps.meta.outputs.tag }}"
+          ZIP="${{ steps.meta.outputs.zip }}"
+          (cd build/web && zip -qr "../../$ZIP" .)
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            if ! gh release view "$TAG" >/dev/null 2>&1; then
+              gh release create "$TAG" --title "$TAG" --notes "Hyvapeli web build. Mmmmm coins." "$ZIP"
+            else
+              gh release upload "$TAG" "$ZIP" --clobber
+            fi
+            gh release view "$TAG"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload web zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: webzip
+          path: ${{ steps.meta.outputs.zip }}
+          retention-days: 7
+
+  deploy-prod:
+    needs: export-web
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download web zip artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: webzip
+          path: /tmp/proddeploy
+
+      - name: Set up deploy key
+        run: |
+          set -e
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy web build to production
+        run: |
+          set -e
+          TAG="${{ needs.export-web.outputs.tag }}"
+          ZIP="${{ needs.export-web.outputs.zip }}"
+          scp -i ~/.ssh/deploy_key /tmp/proddeploy/"$ZIP" "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/tmp/$ZIP"
+          ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "set -e; rm -rf /tmp/proddeploy && mkdir -p /tmp/proddeploy && unzip -q -o /tmp/$ZIP -d /tmp/proddeploy && cp -f /tmp/proddeploy/* ${{ env.WEBROOT }}/ && echo $TAG > ${{ env.WEBROOT }}/.version && rm -rf /tmp/proddeploy /tmp/$ZIP && cat ${{ env.WEBROOT }}/.version"
