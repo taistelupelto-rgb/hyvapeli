@@ -15,6 +15,7 @@ const AUTOPLAY_RESTART_DELAY := 2.0
 const EAT_FLASH_TIME := 0.5
 const DANGER_LOOKAHEAD := 2
 const YELL_STREAM := preload("res://assets/yell.ogg")
+const MUSIC_STREAM := preload("res://assets/music.mp3")
 const YELL_COOLDOWN := 1.0
 const MAX_HEARTS := 3
 const MERCY_TIME := 2.0
@@ -46,6 +47,7 @@ var overlay: CanvasLayer
 var overlay_title: Label
 var overlay_sub: Label
 var yell_player: AudioStreamPlayer
+var music_player: AudioStreamPlayer
 var yell_muted := false
 var last_yell_msec := -100000
 var hearts := 3
@@ -575,6 +577,13 @@ func _build_audio() -> void:
 	yell_player.name = "YellPlayer"
 	yell_player.stream = YELL_STREAM
 	add_child(yell_player)
+	music_player = AudioStreamPlayer.new()
+	music_player.name = "MusicPlayer"
+	music_player.stream = MUSIC_STREAM
+	(music_player.stream as AudioStreamMP3).loop = true
+	music_player.volume_db = -8.0
+	add_child(music_player)
+	music_player.play()
 
 
 func _play_yell() -> void:
@@ -591,6 +600,12 @@ func _toggle_mute() -> void:
 	yell_muted = not yell_muted
 	if yell_muted and yell_player != null and yell_player.playing:
 		yell_player.stop()
+	if music_player != null:
+		if yell_muted:
+			if music_player.playing:
+				music_player.stop()
+		elif not music_player.playing:
+			music_player.play()
 	_update_hud()
 
 
@@ -637,7 +652,7 @@ func _build_hud() -> void:
 	autoplay_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	hud.add_child(autoplay_label)
 	hint_label = Label.new()
-	hint_label.text = "Nekomimi Snake - Mmmmm coins  |  WASD / arrows / swipe  |  R to restart  |  T autoplay  |  M mute"
+	hint_label.text = "Nekomimi Snake - Mmmmm coins  |  WASD / arrows / swipe  |  R to restart  |  T autoplay  |  M mute music  |  click once for sound"
 	hint_label.add_theme_font_size_override("font_size", 18)
 	hint_label.add_theme_color_override("font_color", Color(0.7, 0.8, 0.72))
 	hud.add_child(hint_label)
@@ -682,7 +697,7 @@ func _update_hud() -> void:
 		hp_label.text = "HP: %d" % hearts
 	best_label.text = "Best: %d" % best
 	if hint_label != null:
-		hint_label.text = "Nekomimi Snake - Mmmmm coins  |  WASD / arrows / swipe  |  R to restart  |  T autoplay  |  M mute" + ("  [MUTED]" if yell_muted else "")
+		hint_label.text = "Nekomimi Snake - Mmmmm coins  |  WASD / arrows / swipe  |  R to restart  |  T autoplay  |  M mute music  |  click once for sound" + ("  [MUTED]" if yell_muted else "")
 	_update_autoplay_badge()
 
 
