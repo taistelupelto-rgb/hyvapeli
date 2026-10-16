@@ -68,6 +68,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Diagnose export setup
+        run: |
+          set -e
+          ls "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable/" | head -n 30
+          echo "--- presets ---"
+          cat export_presets.cfg
+          echo "--- project ---"
+          cat project.godot
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Import + export web
         run: |
           set -e
