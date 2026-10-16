@@ -12,6 +12,8 @@ const MIN_STEP := 0.07
 const RAMP_PER_COIN := 0.003
 const GLOW_DOT_COUNT := 24  # only extra-draw cost; zero extra nodes
 const AUTOPLAY_RESTART_DELAY := 2.0
+const YELL_STREAM := preload("res://assets/yell.ogg")
+const YELL_COOLDOWN := 8.0
 
 var snake: Array[Vector2i] = []
 var dir := Vector2i.RIGHT
@@ -36,6 +38,9 @@ var autoplay_label: Label
 var overlay: CanvasLayer
 var overlay_title: Label
 var overlay_sub: Label
+var yell_player: AudioStreamPlayer
+var yell_muted := false
+var last_yell_msec := -100000
 
 
 func _ready() -> void:
@@ -43,6 +48,7 @@ func _ready() -> void:
 	_seed_glow_dots()
 	_build_hud()
 	_build_overlay()
+	_build_audio()
 	start_game()
 
 
@@ -183,6 +189,7 @@ func _step() -> void:
 func _die() -> void:
 	alive = false
 	death_timer = 0.0
+	_play_yell()
 	if score > best:
 		best = score
 	overlay_title.text = "GAME OVER"
@@ -328,6 +335,8 @@ func _input(event: InputEvent) -> void:
 				_player_steer(Vector2i.RIGHT)
 			KEY_T:
 				_toggle_autoplay()
+			KEY_M:
+				_toggle_mute()
 			KEY_R, KEY_ENTER, KEY_KP_ENTER, KEY_SPACE:
 				restart_game()
 		# Fallback for layouts where physical keycode is unset (web quirk).
@@ -343,6 +352,8 @@ func _input(event: InputEvent) -> void:
 					_player_steer(Vector2i.RIGHT)
 				KEY_T:
 					_toggle_autoplay()
+				KEY_M:
+					_toggle_mute()
 		return
 	if event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
@@ -378,6 +389,30 @@ func _toggle_autoplay() -> void:
 	else:
 		_update_hud()
 		queue_redraw()
+
+
+func _build_audio() -> void:
+	yell_player = AudioStreamPlayer.new()
+	yell_player.name = "YellPlayer"
+	yell_player.stream = YELL_STREAM
+	add_child(yell_player)
+
+
+func _play_yell() -> void:
+	if yell_muted or yell_player == null:
+		return
+	var now_msec := Time.get_ticks_msec()
+	if now_msec - last_yell_msec < YELL_COOLDOWN * 1000.0:
+		return
+	last_yell_msec = now_msec
+	yell_player.play()
+
+
+func _toggle_mute() -> void:
+	yell_muted = not yell_muted
+	if yell_muted and yell_player != null and yell_player.playing:
+		yell_player.stop()
+	_update_hud()
 
 
 func _apply_swipe(pos: Vector2) -> void:
@@ -417,7 +452,7 @@ func _build_hud() -> void:
 	autoplay_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	hud.add_child(autoplay_label)
 	hint_label = Label.new()
-	hint_label.text = "Nekomimi Snake - Mmmmm coins  |  WASD / arrows / swipe  |  R to restart  |  T autoplay"
+	hint_label.text = "Nekomimi Snake - Mmmmm coins  |  WASD / arrows / swipe  |  R to restart  |  T autoplay  |  M mute"
 	hint_label.add_theme_font_size_override("font_size", 18)
 	hint_label.add_theme_color_override("font_color", Color(0.7, 0.8, 0.72))
 	hud.add_child(hint_label)
@@ -459,6 +494,8 @@ func _build_overlay() -> void:
 func _update_hud() -> void:
 	score_label.text = "Coins: %d" % score
 	best_label.text = "Best: %d" % best
+	if hint_label != null:
+		hint_label.text = "Nekomimi Snake - Mmmmm coins  |  WASD / arrows / swipe  |  R to restart  |  T autoplay  |  M mute" + ("  [MUTED]" if yell_muted else "")
 	_update_autoplay_badge()
 
 
