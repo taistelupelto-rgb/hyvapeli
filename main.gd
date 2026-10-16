@@ -1,5 +1,5 @@
 extends Node2D
-## Hyvapeli: Snake with coins. Eat golden coins to grow and score.
+## Hyvapeli: Nekomimi Snake - Mmmmm coins. Eat golden coins to grow and score.
 ## Controls: WASD / arrows, swipe or drag to steer. R / Enter / Space / click / tap restarts.
 
 const GRID_COLS := 24
@@ -163,21 +163,34 @@ func _draw() -> void:
 		draw_colored_polygon(_octagon_points(cc, r), Color(0.78, 0.55, 0.05))
 		draw_colored_polygon(_octagon_points(cc, r * 0.7), Color(1.0, 0.85, 0.3))
 		draw_circle(cc + Vector2(-r * 0.22, -r * 0.28), r * 0.18, Color(1.0, 0.96, 0.7))
-	# Snake: green rounded body, lighter head, white eyes.
+	# Snake: pastel nekomimi head (pink/white, cat ears, cute eyes),
+	# pastel mint/lavender body, golden coin. Grid logic untouched.
 	for i in range(snake.size() - 1, -1, -1):
 		var cell_rect := Rect2(ORIGIN + Vector2(snake[i]) * CELL + Vector2(2, 2), Vector2(CELL - 4, CELL - 4))
 		if i == 0:
-			draw_rect(cell_rect, Color(0.35, 0.85, 0.42), true)
 			var hc := cell_rect.get_center()
+			# Nekomimi ears: two small triangles on top edge (outer pink, inner white).
+			draw_rect(cell_rect, Color(1.0, 0.78, 0.86), true)
+			var ear_l := PackedVector2Array([hc + Vector2(-10, -8), hc + Vector2(-2, -8), hc + Vector2(-8, -20)])
+			var ear_r := PackedVector2Array([hc + Vector2(2, -8), hc + Vector2(10, -8), hc + Vector2(8, -20)])
+			draw_colored_polygon(ear_l, Color(1.0, 0.62, 0.76))
+			draw_colored_polygon(ear_r, Color(1.0, 0.62, 0.76))
+			var in_l := PackedVector2Array([hc + Vector2(-8, -10), hc + Vector2(-4, -10), hc + Vector2(-7.2, -16)])
+			var in_r := PackedVector2Array([hc + Vector2(4, -10), hc + Vector2(8, -10), hc + Vector2(7.2, -16)])
+			draw_colored_polygon(in_l, Color(1.0, 1.0, 1.0))
+			draw_colored_polygon(in_r, Color(1.0, 1.0, 1.0))
 			var eye_off := Vector2(dir) * 6.0
 			var perp := Vector2(-dir.y, dir.x) * 7.0
-			draw_circle(hc + eye_off + perp, 4.0, Color.WHITE)
-			draw_circle(hc + eye_off - perp, 4.0, Color.WHITE)
-			draw_circle(hc + eye_off + perp, 2.0, Color(0.02, 0.05, 0.03))
-			draw_circle(hc + eye_off - perp, 2.0, Color(0.02, 0.05, 0.03))
+			draw_circle(hc + eye_off + perp, 4.5, Color.WHITE)
+			draw_circle(hc + eye_off - perp, 4.5, Color.WHITE)
+			draw_circle(hc + eye_off + perp, 2.2, Color(0.15, 0.12, 0.18))
+			draw_circle(hc + eye_off - perp, 2.2, Color(0.15, 0.12, 0.18))
+			draw_circle(hc + eye_off + perp + Vector2(-1, -1), 0.9, Color.WHITE)
+			draw_circle(hc + eye_off - perp + Vector2(-1, -1), 0.9, Color.WHITE)
 		else:
 			var t := float(i) / float(maxi(snake.size() - 1, 1))
-			var col := Color(0.18, 0.75, 0.35).lerp(Color(0.10, 0.45, 0.20), t)
+			var base := Color(0.62, 0.93, 0.79) if i % 2 == 0 else Color(0.79, 0.79, 0.98)
+			var col := base.lerp(base.darkened(0.18), t)
 			draw_rect(cell_rect, col, true)
 
 
@@ -286,13 +299,13 @@ func _build_hud() -> void:
 	best_label.size = Vector2(200, 48)
 	best_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	hint_label = Label.new()
-	hint_label.text = "WASD / arrows / swipe to steer  |  R to restart"
+	hint_label.text = "Nekomimi Snake - Mmmmm coins  |  WASD / arrows / swipe  |  R to restart"
 	hint_label.add_theme_font_size_override("font_size", 18)
 	hint_label.add_theme_color_override("font_color", Color(0.7, 0.8, 0.72))
 	hud.add_child(hint_label)
 	hint_label.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
-	hint_label.position = Vector2(-250, -36)
-	hint_label.size = Vector2(500, 28)
+	hint_label.position = Vector2(-350, -36)
+	hint_label.size = Vector2(700, 28)
 	hint_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 
 
@@ -305,6 +318,7 @@ func _build_overlay() -> void:
 	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	overlay.add_child(dim)
 	overlay_title = Label.new()
+	overlay_title.text = "Nekomimi Snake - Mmmmm coins"
 	overlay_title.add_theme_font_size_override("font_size", 56)
 	overlay_title.add_theme_color_override("font_color", Color(1.0, 0.85, 0.3))
 	overlay_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER

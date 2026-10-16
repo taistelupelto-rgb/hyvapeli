@@ -7,6 +7,10 @@
   <circle cx="44" cy="84" r="14" fill="#2fbf5a" stroke="#14522a" stroke-width="4"/>
   <circle cx="68" cy="84" r="14" fill="#2fbf5a" stroke="#14522a" stroke-width="4"/>
   <circle cx="90" cy="74" r="14" fill="#2fbf5a" stroke="#14522a" stroke-width="4"/>
+  <polygon points="79,66 89,64 81,50" fill="#ff9ec0" stroke="#14522a" stroke-width="2" stroke-linejoin="round"/>
+  <polygon points="91,64 101,66 99,50" fill="#ff9ec0" stroke="#14522a" stroke-width="2" stroke-linejoin="round"/>
+  <polygon points="82,63 87,62 83,55" fill="#ffffff"/>
+  <polygon points="93,62 98,63 97,55" fill="#ffffff"/>
   <circle cx="38" cy="62" r="3.2" fill="#ffffff"/>
   <circle cx="50" cy="62" r="3.2" fill="#ffffff"/>
   <circle cx="38" cy="62" r="1.5" fill="#0b1a10"/>
