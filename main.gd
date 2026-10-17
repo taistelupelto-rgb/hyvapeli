@@ -68,6 +68,10 @@ var roamer_trim: Array[Color] = []
 var roamer_skin: Array[Color] = []
 var roamer_shade: Array[Color] = []
 var oct_unit := PackedVector2Array()
+# Reused polygon buffers: _draw fills then draws immediately, so sharing
+# is safe and kills all per-frame PackedVector2Array allocations.
+var poly8 := PackedVector2Array()
+var tri3 := PackedVector2Array()
 
 
 func _ready() -> void:
@@ -588,14 +592,14 @@ func _draw() -> void:
 			draw_circle(hc, CELL * 0.75, Color(1.0, 1.0, 1.0, 0.14 + 0.12 * hpulse))
 			# Nekomimi ears: two small triangles on top edge (outer pink, inner white).
 			draw_rect(cell_rect, Color(1.0, 0.78, 0.86), true)
-			var ear_l := PackedVector2Array([hc + Vector2(-10, -8), hc + Vector2(-2, -8), hc + Vector2(-8, -20)])
-			var ear_r := PackedVector2Array([hc + Vector2(2, -8), hc + Vector2(10, -8), hc + Vector2(8, -20)])
-			draw_colored_polygon(ear_l, Color(1.0, 0.62, 0.76))
-			draw_colored_polygon(ear_r, Color(1.0, 0.62, 0.76))
-			var in_l := PackedVector2Array([hc + Vector2(-8, -10), hc + Vector2(-4, -10), hc + Vector2(-7.2, -16)])
-			var in_r := PackedVector2Array([hc + Vector2(4, -10), hc + Vector2(8, -10), hc + Vector2(7.2, -16)])
-			draw_colored_polygon(in_l, Color(1.0, 1.0, 1.0))
-			draw_colored_polygon(in_r, Color(1.0, 1.0, 1.0))
+			_tri(hc + Vector2(-10, -8), hc + Vector2(-2, -8), hc + Vector2(-8, -20))
+			draw_colored_polygon(tri3, Color(1.0, 0.62, 0.76))
+			_tri(hc + Vector2(2, -8), hc + Vector2(10, -8), hc + Vector2(8, -20))
+			draw_colored_polygon(tri3, Color(1.0, 0.62, 0.76))
+			_tri(hc + Vector2(-8, -10), hc + Vector2(-4, -10), hc + Vector2(-7.2, -16))
+			draw_colored_polygon(tri3, Color(1.0, 1.0, 1.0))
+			_tri(hc + Vector2(4, -10), hc + Vector2(8, -10), hc + Vector2(7.2, -16))
+			draw_colored_polygon(tri3, Color(1.0, 1.0, 1.0))
 			var eye_off := Vector2(dir) * 6.0
 			var perp := Vector2(-dir.y, dir.x) * 7.0
 			draw_circle(hc + eye_off + perp, 4.5, Color.WHITE)
@@ -617,13 +621,23 @@ func _draw() -> void:
 		draw_rect(Rect2(Vector2.ZERO, Vector2(1152, 648)), Color(1.0, 0.1, 0.1, 0.45 * hurt_flash))
 
 
+func _tri(a: Vector2, b: Vector2, c: Vector2) -> void:
+	# Fill the shared triangle buffer. Draw must follow immediately.
+	if tri3.size() != 3:
+		tri3.resize(3)
+	tri3[0] = a
+	tri3[1] = b
+	tri3[2] = c
+
+
 func _octagon_points(center: Vector2, radius: float) -> PackedVector2Array:
 	# Scale/translate the baked unit octagon: no sin/cos per frame.
-	var pts := PackedVector2Array()
-	pts.resize(8)
+	# Shared buffer, no allocation; draw must follow immediately.
+	if poly8.size() != 8:
+		poly8.resize(8)
 	for i in 8:
-		pts[i] = center + oct_unit[i] * radius
-	return pts
+		poly8[i] = center + oct_unit[i] * radius
+	return poly8
 
 
 func _poll_keys() -> void:
