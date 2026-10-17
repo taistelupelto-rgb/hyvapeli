@@ -21,6 +21,10 @@ const MAX_HEARTS := 3
 const MERCY_TIME := 2.0
 const COINS_PER_HEART := 8
 const HURT_FLASH_TIME := 0.6
+const ROAMER_COUNT := 50
+const ROAMER_MIN_SPEED := 120.0
+const ROAMER_MAX_SPEED := 260.0
+const ROAMER_TURN_CHANCE := 0.6
 
 var snake: Array[Vector2i] = []
 var dir := Vector2i.RIGHT
@@ -55,11 +59,22 @@ var mercy_timer := 0.0
 var hurt_flash := 0.0
 var coins_since_heal := 0
 var hp_label: Label
+# Ambient crowd: parallel typed arrays (no per-frame Dict/Variant overhead).
+var roamer_pos: Array[Vector2] = []
+var roamer_vel: Array[Vector2] = []
+var roamer_phase: Array[float] = []
+var roamer_tunic: Array[Color] = []
+var roamer_trim: Array[Color] = []
+var roamer_skin: Array[Color] = []
+var roamer_shade: Array[Color] = []
+var oct_unit := PackedVector2Array()
 
 
 func _ready() -> void:
 	rng.randomize()
 	_seed_glow_dots()
+	_seed_oct_unit()
+	_seed_roamers()
 	_build_hud()
 	_build_overlay()
 	_build_audio()
@@ -88,6 +103,7 @@ func restart_game() -> void:
 	drag_start = Vector2.INF
 	# NOTE: autoplay flag preserved; manual restarts stay manual, autoplay stays autoplay.
 	_place_coin()
+	_seed_roamers()
 	overlay.visible = false
 	_update_hud()
 	queue_redraw()
@@ -385,8 +401,124 @@ func _seed_glow_dots() -> void:
 		glow_phase.append(rng.randf_range(0.0, TAU))
 
 
+func _seed_oct_unit() -> void:
+	# Unit octagon baked once; coin draw just scales/translates it.
+	oct_unit.clear()
+	for i in 8:
+		var a := TAU * float(i) / 8.0 + PI / 8.0
+		oct_unit.append(Vector2(cos(a), sin(a)))
+
+
+func _field_rect() -> Rect2:
+	return Rect2(ORIGIN, Vector2(GRID_COLS * CELL, GRID_ROWS * CELL))
+
+
+func _seed_roamers() -> void:
+	# Ambient background crowd: 50 fast wanderers, no gameplay effect.
+	# Respectful pixel-art field workers with conical straw hats.
+	# Derived shades are baked here so _draw does zero allocs/conversions.
+	roamer_pos.clear()
+	roamer_vel.clear()
+	roamer_phase.clear()
+	roamer_tunic.clear()
+	roamer_trim.clear()
+	roamer_skin.clear()
+	roamer_shade.clear()
+	var field := _field_rect()
+	var tunics: Array[Color] = [
+		Color(0.25, 0.45, 0.75), Color(0.35, 0.55, 0.65),
+		Color(0.55, 0.45, 0.30), Color(0.45, 0.45, 0.50),
+		Color(0.30, 0.60, 0.45),
+	]
+	var skins: Array[Color] = [
+		Color(0.96, 0.80, 0.62), Color(0.90, 0.71, 0.53),
+		Color(0.82, 0.62, 0.45),
+	]
+	for i in ROAMER_COUNT:
+		roamer_pos.append(Vector2(
+			rng.randf_range(field.position.x + 16.0, field.end.x - 16.0),
+			rng.randf_range(field.position.y + 16.0, field.end.y - 16.0)
+		))
+		var ang := rng.randf_range(0.0, TAU)
+		var speed := rng.randf_range(ROAMER_MIN_SPEED, ROAMER_MAX_SPEED)
+		roamer_vel.append(Vector2(cos(ang), sin(ang)) * speed)
+		roamer_phase.append(rng.randf_range(0.0, TAU))
+		var tunic: Color = tunics[rng.randi_range(0, tunics.size() - 1)]
+		var skin: Color = skins[rng.randi_range(0, skins.size() - 1)]
+		roamer_tunic.append(tunic)
+		roamer_trim.append(tunic.darkened(0.35))
+		roamer_skin.append(skin)
+		roamer_shade.append(skin.darkened(0.25))
+
+
+func _update_roamers(delta: float) -> void:
+	if roamer_pos.is_empty():
+		return
+	var field := _field_rect()
+	var margin := 10.0
+	for i in roamer_pos.size():
+		var pos := roamer_pos[i]
+		var vel := roamer_vel[i]
+		# Random wander turns, keeps them roaming instead of straight lines.
+		if rng.randf() < ROAMER_TURN_CHANCE * delta:
+			vel = vel.rotated(rng.randf_range(-0.5, 0.5))
+			# Keep speed in the fast band after rotation.
+			var sp := clampf(vel.length(), ROAMER_MIN_SPEED, ROAMER_MAX_SPEED)
+			vel = vel.normalized() * sp
+		pos += vel * delta
+		# Bounce off arena walls.
+		if pos.x < field.position.x + margin:
+			pos.x = field.position.x + margin
+			vel.x = absf(vel.x)
+		elif pos.x > field.end.x - margin:
+			pos.x = field.end.x - margin
+			vel.x = -absf(vel.x)
+		if pos.y < field.position.y + margin:
+			pos.y = field.position.y + margin
+			vel.y = absf(vel.y)
+		elif pos.y > field.end.y - margin:
+			pos.y = field.end.y - margin
+			vel.y = -absf(vel.y)
+		roamer_pos[i] = pos
+		roamer_vel[i] = vel
+		roamer_phase[i] = roamer_phase[i] + delta * vel.length() * 0.06
+
+
+func _draw_roamer(center: Vector2, facing_x: float, phase: float, tunic: Color, trim: Color, skin: Color, shade: Color) -> void:
+	# Chunky pixel-art field worker, ~16x26 px. Rects only: no per-frame
+	# allocs, no circle/polygon triangulation. Drawn feet-first.
+	var hat := Color(0.85, 0.72, 0.42)
+	var hat_dark := Color(0.62, 0.50, 0.28)
+	var pants := Color(0.16, 0.16, 0.20)
+	var step := sin(phase) * 3.0
+	# Flat rect shadow: cheaper than a circle.
+	draw_rect(Rect2(center + Vector2(-6, 11), Vector2(12, 2)), Color(0, 0, 0, 0.25))
+	# Legs: 2-frame run, alternate offsets. Sandals folded into leg base.
+	draw_rect(Rect2(center + Vector2(-5, 4 + step * 0.5), Vector2(4, 8)), pants)
+	draw_rect(Rect2(center + Vector2(1, 4 - step * 0.5), Vector2(4, 8)), pants)
+	# Tunic body + belt.
+	draw_rect(Rect2(center + Vector2(-6, -4), Vector2(12, 9)), tunic)
+	draw_rect(Rect2(center + Vector2(-6, 2), Vector2(12, 2)), trim)
+	# Arms swinging opposite to legs.
+	draw_rect(Rect2(center + Vector2(-9, -3 - step * 0.5), Vector2(3, 6)), shade)
+	draw_rect(Rect2(center + Vector2(6, -3 + step * 0.5), Vector2(3, 6)), shade)
+	# Head + hair fringe.
+	draw_rect(Rect2(center + Vector2(-4, -10), Vector2(8, 6)), skin)
+	draw_rect(Rect2(center + Vector2(-4, -10), Vector2(8, 2)), Color(0.10, 0.10, 0.12))
+	# Eyes: plain single-pixel dots, shifted by facing.
+	var look := clampf(facing_x, -1.0, 1.0) * 1.5
+	draw_rect(Rect2(center + Vector2(-2 + look, -7), Vector2(1, 2)), Color(0.10, 0.10, 0.12))
+	draw_rect(Rect2(center + Vector2(1 + look, -7), Vector2(1, 2)), Color(0.10, 0.10, 0.12))
+	# Stepped-pyramid straw hat: 3 rects + dark brim, no polygon alloc.
+	draw_rect(Rect2(center + Vector2(-2, -19), Vector2(4, 3)), hat)
+	draw_rect(Rect2(center + Vector2(-5, -16), Vector2(10, 4)), hat)
+	draw_rect(Rect2(center + Vector2(-8, -12), Vector2(16, 2)), hat)
+	draw_rect(Rect2(center + Vector2(-8, -10), Vector2(16, 1)), hat_dark)
+
+
 func _process(delta: float) -> void:
 	rainbow_t += delta
+	_update_roamers(delta)
 	if eat_flash > 0.0:
 		eat_flash = maxf(0.0, eat_flash - delta / EAT_FLASH_TIME)
 	if hurt_flash > 0.0:
@@ -428,6 +560,11 @@ func _draw() -> void:
 		for x in GRID_COLS:
 			if (x + y) % 2 == 0:
 				draw_rect(Rect2(ORIGIN + Vector2(x, y) * CELL, Vector2(CELL, CELL)), Color(1, 1, 1, 0.03))
+	# Ambient roamers: background only, no collision, drawn under coin/snake.
+	for i in roamer_pos.size():
+		var rv := roamer_vel[i]
+		var fx := 1.0 if rv.x >= 0.0 else -1.0
+		_draw_roamer(roamer_pos[i], fx, roamer_phase[i], roamer_tunic[i], roamer_trim[i], roamer_skin[i], roamer_shade[i])
 	# Coin: golden octagon with sparkle pulse (scale/alpha oscillation).
 	if coin.x >= 0:
 		var sparkle := 0.5 + 0.5 * sin(rainbow_t * 6.0)
@@ -481,10 +618,11 @@ func _draw() -> void:
 
 
 func _octagon_points(center: Vector2, radius: float) -> PackedVector2Array:
+	# Scale/translate the baked unit octagon: no sin/cos per frame.
 	var pts := PackedVector2Array()
+	pts.resize(8)
 	for i in 8:
-		var a := TAU * float(i) / 8.0 + PI / 8.0
-		pts.append(center + Vector2(cos(a), sin(a)) * radius)
+		pts[i] = center + oct_unit[i] * radius
 	return pts
 
 
